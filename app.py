@@ -16,11 +16,15 @@ os.environ.setdefault("VLLM_ENGINE_ITERATION_TIMEOUT_S", "300")
 os.environ.setdefault("VLLM_GPU_MEMORY_UTILIZATION", os.getenv("VLLM_GPU_MEMORY_UTILIZATION", "0.85"))
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse, StreamingResponse, JSONResponse
-from fastapi.templating import Jinja2Templates
+from fastapi.responses import Response, HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-
-# Orpheus (original Canopy Labs)
+from fastapi.templating import Jinja2Templates
+import os
+import time
+import logging
+import struct
+import asyncio
+from typing import Optional
 from orpheus_tts import OrpheusModel
 
 # Logging
@@ -146,59 +150,75 @@ async def tts(payload: dict):
     try:
         logger.info(f"Generating TTS for prompt: '{prompt[:50]}...' with voice: {voice}")
         
-        # Generate speech - OrpheusModel.generate_speech returns an iterator of audio chunks
-        audio_chunks = Engine.model.generate_speech(
-            prompt=prompt,
-            voice=voice,
-            repetition_penalty=1.1,
-            stop_token_ids=[128258],
-            max_tokens=2000,
-            temperature=0.4,
-            top_p=0.9
+        def create_wav_header(sample_rate=24000, bits_per_sample=16, channels=1):
+            """Create WAV header for streaming"""
+            byte_rate = sample_rate * channels * bits_per_sample // 8
+            block_align = channels * bits_per_sample // 8
+            data_size = 0  # Will be updated later
+            
+            header = struct.pack(
+                '<4sI4s4sIHHIIHH4sI',
+                b'RIFF',
+                36 + data_size,
+                b'WAVE', 
+                b'fmt ',
+                16,
+                1,
+                channels,
+                sample_rate,
+                byte_rate,
+                block_align,
+                bits_per_sample,
+                b'data',
+                data_size
+            )
+            return header
+        
+        def generate_audio_stream():
+            """Generator function for streaming audio"""
+            try:
+                # Send WAV header first
+                yield create_wav_header(sample_rate=sample_rate)
+                
+                # Generate speech chunks
+                audio_chunks = Engine.model.generate_speech(
+                    prompt=prompt,
+                    voice=voice,
+                    repetition_penalty=1.1,
+                    stop_token_ids=[128258],
+                    max_tokens=2000,
+                    temperature=0.4,
+                    top_p=0.9
+                )
+                
+                chunk_count = 0
+                for chunk in audio_chunks:
+                    if isinstance(chunk, bytes):
+                        yield chunk
+                        chunk_count += 1
+                    else:
+                        yield bytes(chunk)
+                        chunk_count += 1
+                    
+                    # Log progress every 10 chunks
+                    if chunk_count % 10 == 0:
+                        logger.info(f"Streamed {chunk_count} audio chunks")
+                
+                logger.info(f"Completed streaming {chunk_count} total audio chunks")
+                
+            except Exception as e:
+                logger.exception(f"Error in audio stream generation: {e}")
+                raise
+        
+        # Return streaming response
+        return StreamingResponse(
+            generate_audio_stream(),
+            media_type="audio/wav",
+            headers={
+                "Content-Disposition": "attachment; filename=speech.wav",
+                "Cache-Control": "no-cache"
+            }
         )
-        
-        # Collect all audio chunks
-        pcm_bytes = b""
-        chunk_count = 0
-        for chunk in audio_chunks:
-            if isinstance(chunk, bytes):
-                pcm_bytes += chunk
-                chunk_count += 1
-            else:
-                # Convert to bytes if needed
-                pcm_bytes += bytes(chunk)
-                chunk_count += 1
-        
-        logger.info(f"Collected {chunk_count} audio chunks, total PCM bytes: {len(pcm_bytes)}")
-        
-        if len(pcm_bytes) == 0:
-            raise ValueError("No audio data generated")
-
-        # Build WAV header for 16-bit mono PCM at sample_rate
-        import struct
-        channels = 1
-        bits_per_sample = 16
-        byte_rate = sample_rate * channels * bits_per_sample // 8
-        block_align = channels * bits_per_sample // 8
-        data_size = len(pcm_bytes)
-        header = struct.pack(
-            '<4sI4s4sIHHIIHH4sI',
-            b'RIFF',
-            36 + data_size,
-            b'WAVE',
-            b'fmt ',
-            16,
-            1,
-            channels,
-            sample_rate,
-            byte_rate,
-            block_align,
-            bits_per_sample,
-            b'data',
-            data_size,
-        )
-        wav_bytes = header + pcm_bytes
-        logger.info(f"Generated WAV file: {len(wav_bytes)} bytes total")
     except Exception as e:
         logger.exception("Generation failed: %s", e)
         # Attempt one soft-reload retry
@@ -210,69 +230,51 @@ async def tts(payload: dict):
             raise HTTPException(status_code=503, detail=f"Engine reload failed (GPU mem?): {load_err}")
         try:
             logger.info("Retrying TTS generation after engine reload")
-            audio_chunks = Engine.model.generate_speech(
-                prompt=prompt,
-                voice=voice,
-                repetition_penalty=1.1,
-                stop_token_ids=[128258],
-                max_tokens=2000,
-                temperature=0.4,
-                top_p=0.9
+            
+            def generate_retry_stream():
+                try:
+                    yield create_wav_header(sample_rate=sample_rate)
+                    
+                    audio_chunks = Engine.model.generate_speech(
+                        prompt=prompt,
+                        voice=voice,
+                        repetition_penalty=1.1,
+                        stop_token_ids=[128258],
+                        max_tokens=2000,
+                        temperature=0.4,
+                        top_p=0.9
+                    )
+                    
+                    chunk_count = 0
+                    for chunk in audio_chunks:
+                        if isinstance(chunk, bytes):
+                            yield chunk
+                            chunk_count += 1
+                        else:
+                            yield bytes(chunk)
+                            chunk_count += 1
+                    
+                    logger.info(f"Retry completed: {chunk_count} chunks streamed")
+                    
+                except Exception as e:
+                    logger.exception(f"Error in retry stream: {e}")
+                    raise
+            
+            return StreamingResponse(
+                generate_retry_stream(),
+                media_type="audio/wav",
+                headers={
+                    "Content-Disposition": "attachment; filename=speech.wav",
+                    "Cache-Control": "no-cache"
+                }
             )
-            
-            pcm_bytes = b""
-            chunk_count = 0
-            for chunk in audio_chunks:
-                if isinstance(chunk, bytes):
-                    pcm_bytes += chunk
-                    chunk_count += 1
-                else:
-                    pcm_bytes += bytes(chunk)
-                    chunk_count += 1
-            
-            logger.info(f"Retry: Collected {chunk_count} chunks, {len(pcm_bytes)} PCM bytes")
-            
-            if len(pcm_bytes) == 0:
-                raise ValueError("No audio data generated on retry")
-                
-            import struct
-            channels = 1
-            bits_per_sample = 16
-            byte_rate = sample_rate * channels * bits_per_sample // 8
-            block_align = channels * bits_per_sample // 8
-            data_size = len(pcm_bytes)
-            header = struct.pack(
-                '<4sI4s4sIHHIIHH4sI',
-                b'RIFF',
-                36 + data_size,
-                b'WAVE',
-                b'fmt ',
-                16,
-                1,
-                channels,
-                sample_rate,
-                byte_rate,
-                block_align,
-                bits_per_sample,
-                b'data',
-                data_size,
-            )
-            wav_bytes = header + pcm_bytes
         except Exception as e2:
             logger.exception("Retry failed: %s", e2)
             raise HTTPException(status_code=500, detail=f"TTS failed: {e2}")
 
     Engine.maybe_reload()
 
-    def iterfile():
-        yield wav_bytes
-
-    headers = {
-        "Content-Disposition": f"inline; filename=tts.wav",
-        "X-Voice": voice,
-        "X-Sample-Rate": str(sample_rate),
-    }
-    return StreamingResponse(iterfile(), media_type="audio/wav", headers=headers)
+    raise HTTPException(status_code=500, detail="Unexpected code path")
 
 
 if __name__ == "__main__":
