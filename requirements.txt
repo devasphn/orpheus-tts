@@ -1,0 +1,20 @@
+# Base web & config
+fastapi==0.111.0
+uvicorn[standard]==0.30.3
+jinja2==3.1.4
+pydantic==2.7.4
+python-dotenv==1.0.1
+
+# Utilities
+requests==2.32.3
+psutil==5.9.8
+
+# Audio helpers (optional; server returns wav bytes)
+soundfile==0.12.1
+numpy==1.26.4
+
+# TTS stack (install GPU wheels separately below)
+# torch / torchvision / torchaudio -> install CUDA 12.1 wheels from PyTorch index
+# vllm -> 0.10.0
+# orpheus-speech -> 0.1.0
+# snac -> 1.2.1
