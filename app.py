@@ -144,12 +144,41 @@ async def tts(payload: dict):
     sample_rate = int(payload.get("sample_rate", SAMPLE_RATE))
 
     try:
-        # Generate speech
-        wav_bytes = Engine.model.generate_speech(
+        # Generate speech (OrpheusModel does not accept sample_rate kwarg)
+        res = Engine.model.generate_speech(
             prompt=prompt,
             voice=voice,
-            sample_rate=sample_rate,
         )
+        # res may be an iterator of PCM bytes; collect
+        if hasattr(res, "__iter__") and not isinstance(res, (bytes, bytearray)):
+            pcm_bytes = b"".join(chunk for chunk in res)
+        else:
+            pcm_bytes = bytes(res)
+
+        # Build WAV header for 16-bit mono PCM at sample_rate
+        import struct
+        channels = 1
+        bits_per_sample = 16
+        byte_rate = sample_rate * channels * bits_per_sample // 8
+        block_align = channels * bits_per_sample // 8
+        data_size = len(pcm_bytes)
+        header = struct.pack(
+            '<4sI4s4sIHHIIHH4sI',
+            b'RIFF',
+            36 + data_size,
+            b'WAVE',
+            b'fmt ',
+            16,
+            1,
+            channels,
+            sample_rate,
+            byte_rate,
+            block_align,
+            bits_per_sample,
+            b'data',
+            data_size,
+        )
+        wav_bytes = header + pcm_bytes
     except Exception as e:
         logger.exception("Generation failed: %s", e)
         # Attempt one soft-reload retry
@@ -160,7 +189,34 @@ async def tts(payload: dict):
             # Likely GPU memory too low; surface clear error
             raise HTTPException(status_code=503, detail=f"Engine reload failed (GPU mem?): {load_err}")
         try:
-            wav_bytes = Engine.model.generate_speech(prompt=prompt, voice=voice, sample_rate=sample_rate)
+            res = Engine.model.generate_speech(prompt=prompt, voice=voice)
+            if hasattr(res, "__iter__") and not isinstance(res, (bytes, bytearray)):
+                pcm_bytes = b"".join(chunk for chunk in res)
+            else:
+                pcm_bytes = bytes(res)
+            import struct
+            channels = 1
+            bits_per_sample = 16
+            byte_rate = sample_rate * channels * bits_per_sample // 8
+            block_align = channels * bits_per_sample // 8
+            data_size = len(pcm_bytes)
+            header = struct.pack(
+                '<4sI4s4sIHHIIHH4sI',
+                b'RIFF',
+                36 + data_size,
+                b'WAVE',
+                b'fmt ',
+                16,
+                1,
+                channels,
+                sample_rate,
+                byte_rate,
+                block_align,
+                bits_per_sample,
+                b'data',
+                data_size,
+            )
+            wav_bytes = header + pcm_bytes
         except Exception as e2:
             logger.exception("Retry failed: %s", e2)
             raise HTTPException(status_code=500, detail=f"TTS failed: {e2}")
