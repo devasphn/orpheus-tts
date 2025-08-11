@@ -1,0 +1,75 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Orpheus TTS (Canopy)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 2rem; }
+    .card { max-width: 760px; margin: auto; padding: 1.5rem; border: 1px solid #e5e7eb; border-radius: 12px; }
+    h1 { margin-top: 0; }
+    label { display: block; margin-top: 1rem; font-weight: 600; }
+    textarea { width: 100%; min-height: 120px; padding: 0.75rem; border-radius: 8px; border: 1px solid #cbd5e1; }
+    input, select { width: 100%; padding: 0.6rem; border-radius: 8px; border: 1px solid #cbd5e1; }
+    button { margin-top: 1rem; padding: 0.7rem 1rem; border: 0; border-radius: 8px; background: #111827; color: white; cursor: pointer; }
+    .row { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+    audio { width: 100%; margin-top: 1rem; }
+    .muted { color: #64748b; font-size: 0.9rem; }
+    .pill { display: inline-block; background: #eef2ff; color: #3730a3; padding: 0.2rem 0.5rem; border-radius: 999px; font-size: 0.8rem; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>Orpheus TTS <span class="pill">Canopy</span></h1>
+    <p class="muted">Enter text and generate speech using the original Orpheus model. Default voice: <strong>{{ default_voice }}</strong>, Sample Rate: <strong>{{ sample_rate }}</strong> Hz</p>
+
+    <label for="text">Text</label>
+    <textarea id="text" placeholder="Hello, this is Orpheus speaking."></textarea>
+
+    <div class="row">
+      <div>
+        <label for="voice">Voice</label>
+        <input id="voice" value="{{ default_voice }}" />
+      </div>
+      <div>
+        <label for="sr">Sample Rate</label>
+        <input id="sr" type="number" min="8000" step="1000" value="{{ sample_rate }}" />
+      </div>
+    </div>
+
+    <button onclick="gen()">Generate</button>
+
+    <audio id="player" controls></audio>
+    <pre id="log" class="muted"></pre>
+  </div>
+
+  <script>
+    async function gen() {
+      const text = document.getElementById('text').value.trim();
+      const voice = document.getElementById('voice').value.trim();
+      const sample_rate = parseInt(document.getElementById('sr').value, 10);
+      const log = document.getElementById('log');
+      log.textContent = 'Generating...';
+
+      const resp = await fetch('/tts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text, voice, sample_rate })
+      });
+
+      if (!resp.ok) {
+        const err = await resp.text();
+        log.textContent = `Error ${resp.status}: ${err}`;
+        return;
+      }
+
+      const blob = await resp.blob();
+      const url = URL.createObjectURL(blob);
+      const player = document.getElementById('player');
+      player.src = url;
+      player.play();
+      log.textContent = 'Done.';
+    }
+  </script>
+</body>
+</html>
