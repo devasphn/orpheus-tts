@@ -57,7 +57,18 @@ class Engine:
         if cls.model is None:
             logger.info("Initializing OrpheusModel: %s", MODEL_NAME)
             try:
-                cls.model = OrpheusModel(model_name=MODEL_NAME)
+                # Read GPU mem utilization; default to 0.85
+                try:
+                    gpu_mem_util = float(os.getenv("VLLM_GPU_MEMORY_UTILIZATION", "0.85"))
+                except Exception:
+                    gpu_mem_util = 0.85
+
+                # IMPORTANT: pass vLLM flags directly; env vars may be ignored by engine args
+                cls.model = OrpheusModel(
+                    model_name=MODEL_NAME,
+                    disable_custom_all_reduce=True,
+                    gpu_memory_utilization=gpu_mem_util,
+                )
                 cls.loaded_at = time.time()
                 cls.requests_since_reload = 0
                 logger.info("OrpheusModel loaded successfully")
@@ -127,8 +138,8 @@ async def tts(payload: dict):
     if Engine.model is None:
         raise HTTPException(status_code=503, detail="Engine not ready")
 
-    text = (payload.get("text") or payload.get("prompt") or "").strip()
-    if not text:
+    prompt = (payload.get("prompt") or payload.get("text") or "").strip()
+    if not prompt:
         raise HTTPException(status_code=400, detail="Missing text")
 
     voice = payload.get("voice", DEFAULT_VOICE)
@@ -137,7 +148,7 @@ async def tts(payload: dict):
     try:
         # Generate speech
         wav_bytes = Engine.model.generate_speech(
-            text=text,
+            prompt=prompt,
             voice=voice,
             sample_rate=sample_rate,
         )
@@ -145,9 +156,13 @@ async def tts(payload: dict):
         logger.exception("Generation failed: %s", e)
         # Attempt one soft-reload retry
         Engine.shutdown()
-        Engine.load()
         try:
-            wav_bytes = Engine.model.generate_speech(text=text, voice=voice, sample_rate=sample_rate)
+            Engine.load()
+        except Exception as load_err:
+            # Likely GPU memory too low; surface clear error
+            raise HTTPException(status_code=503, detail=f"Engine reload failed (GPU mem?): {load_err}")
+        try:
+            wav_bytes = Engine.model.generate_speech(prompt=prompt, voice=voice, sample_rate=sample_rate)
         except Exception as e2:
             logger.exception("Retry failed: %s", e2)
             raise HTTPException(status_code=500, detail=f"TTS failed: {e2}")
