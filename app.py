@@ -144,16 +144,35 @@ async def tts(payload: dict):
     sample_rate = int(payload.get("sample_rate", SAMPLE_RATE))
 
     try:
-        # Generate speech (OrpheusModel does not accept sample_rate kwarg)
-        res = Engine.model.generate_speech(
+        logger.info(f"Generating TTS for prompt: '{prompt[:50]}...' with voice: {voice}")
+        
+        # Generate speech - OrpheusModel.generate_speech returns an iterator of audio chunks
+        audio_chunks = Engine.model.generate_speech(
             prompt=prompt,
             voice=voice,
+            repetition_penalty=1.1,
+            stop_token_ids=[128258],
+            max_tokens=2000,
+            temperature=0.4,
+            top_p=0.9
         )
-        # res may be an iterator of PCM bytes; collect
-        if hasattr(res, "__iter__") and not isinstance(res, (bytes, bytearray)):
-            pcm_bytes = b"".join(chunk for chunk in res)
-        else:
-            pcm_bytes = bytes(res)
+        
+        # Collect all audio chunks
+        pcm_bytes = b""
+        chunk_count = 0
+        for chunk in audio_chunks:
+            if isinstance(chunk, bytes):
+                pcm_bytes += chunk
+                chunk_count += 1
+            else:
+                # Convert to bytes if needed
+                pcm_bytes += bytes(chunk)
+                chunk_count += 1
+        
+        logger.info(f"Collected {chunk_count} audio chunks, total PCM bytes: {len(pcm_bytes)}")
+        
+        if len(pcm_bytes) == 0:
+            raise ValueError("No audio data generated")
 
         # Build WAV header for 16-bit mono PCM at sample_rate
         import struct
@@ -179,6 +198,7 @@ async def tts(payload: dict):
             data_size,
         )
         wav_bytes = header + pcm_bytes
+        logger.info(f"Generated WAV file: {len(wav_bytes)} bytes total")
     except Exception as e:
         logger.exception("Generation failed: %s", e)
         # Attempt one soft-reload retry
@@ -189,11 +209,32 @@ async def tts(payload: dict):
             # Likely GPU memory too low; surface clear error
             raise HTTPException(status_code=503, detail=f"Engine reload failed (GPU mem?): {load_err}")
         try:
-            res = Engine.model.generate_speech(prompt=prompt, voice=voice)
-            if hasattr(res, "__iter__") and not isinstance(res, (bytes, bytearray)):
-                pcm_bytes = b"".join(chunk for chunk in res)
-            else:
-                pcm_bytes = bytes(res)
+            logger.info("Retrying TTS generation after engine reload")
+            audio_chunks = Engine.model.generate_speech(
+                prompt=prompt,
+                voice=voice,
+                repetition_penalty=1.1,
+                stop_token_ids=[128258],
+                max_tokens=2000,
+                temperature=0.4,
+                top_p=0.9
+            )
+            
+            pcm_bytes = b""
+            chunk_count = 0
+            for chunk in audio_chunks:
+                if isinstance(chunk, bytes):
+                    pcm_bytes += chunk
+                    chunk_count += 1
+                else:
+                    pcm_bytes += bytes(chunk)
+                    chunk_count += 1
+            
+            logger.info(f"Retry: Collected {chunk_count} chunks, {len(pcm_bytes)} PCM bytes")
+            
+            if len(pcm_bytes) == 0:
+                raise ValueError("No audio data generated on retry")
+                
             import struct
             channels = 1
             bits_per_sample = 16
