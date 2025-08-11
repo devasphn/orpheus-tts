@@ -63,11 +63,9 @@ class Engine:
                 except Exception:
                     gpu_mem_util = 0.85
 
-                # IMPORTANT: pass vLLM flags directly; env vars may be ignored by engine args
+                # Initialize model (vLLM options are controlled by environment; OrpheusModel does not accept these kwargs)
                 cls.model = OrpheusModel(
-                    model_name=MODEL_NAME,
-                    disable_custom_all_reduce=True,
-                    gpu_memory_utilization=gpu_mem_util,
+                    model_name=MODEL_NAME
                 )
                 cls.loaded_at = time.time()
                 cls.requests_since_reload = 0
